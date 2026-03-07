@@ -1,0 +1,943 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trade Validator - Google Sheets Auto-Sync</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- NEW Google Identity Services SDK -->
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <script src="https://apis.google.com/js/api.js"></script>
+    <style>
+        body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    </style>
+</head>
+<body class="bg-slate-950 text-white">
+    <div id="root"></div>
+    
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        function App() {
+            // State
+            const [isSignedIn, setIsSignedIn] = useState(false);
+            const [userEmail, setUserEmail] = useState('');
+            const [trades, setTrades] = useState([]);
+            const [accessToken, setAccessToken] = useState(null);
+            const [conversationalInput, setConversationalInput] = useState('');
+            const [isProcessing, setIsProcessing] = useState(false);
+            const [showAddTrade, setShowAddTrade] = useState(false);
+            const [selectedTrade, setSelectedTrade] = useState(null);
+            const [view, setView] = useState('dashboard');
+
+            // CONFIGURATION - REPLACE WITH YOUR VALUES
+            const CLIENT_ID = '491798193871-0ds5n8td4mlgf2rnc8biu0o9amisp6ev.apps.googleusercontent.com';
+            const API_KEY = 'AIzaSyArYnuviuNcRujKX12CQMJETHofkc-AdcM';
+            const SPREADSHEET_ID = '1vFPsYivsE_zAR1atfG3eqE2hA9mqRqCR63Lx7haBUUE';
+            const ALPHA_VANTAGE_KEY = 'demo'; // GET FREE KEY: https://www.alphavantage.co/support/#api-key
+
+            // Initialize Google Identity Services
+            useEffect(() => {
+                const initGoogleAuth = () => {
+                    // Step 1: Load the Sheets API
+                    gapi.load('client', async () => {
+                        try {
+                            // Initialize with API key only
+                            await gapi.client.init({
+                                apiKey: API_KEY,
+                            });
+                            
+                            // Load Sheets API
+                            await gapi.client.load('sheets', 'v4');
+                            
+                            console.log('✓ GAPI client initialized successfully');
+                            console.log('✓ Sheets API loaded');
+                            
+                            // Step 2: After GAPI is ready, initialize OAuth client
+                            const client = google.accounts.oauth2.initTokenClient({
+                                client_id: CLIENT_ID,
+                                scope: 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file',
+                                ux_mode: 'popup',
+                                callback: async (tokenResponse) => {
+                                    console.log('✓ Got token response');
+                                    setAccessToken(tokenResponse.access_token);
+                                    gapi.client.setToken({ access_token: tokenResponse.access_token });
+                                    setIsSignedIn(true);
+                                    
+                                    // Wait a bit for token to be set
+                                    setTimeout(() => {
+                                        loadTradesFromSheet();
+                                    }, 500);
+                                },
+                            });
+
+                            window.tokenClient = client;
+                            console.log('✓ OAuth client initialized');
+                        } catch (error) {
+                            console.error('✗ Error initializing GAPI:', error);
+                            console.error('Error details:', error.message, error.stack);
+                            alert('Failed to initialize Google APIs.\n\nError: ' + error.message + '\n\nPlease refresh the page.');
+                        }
+                    });
+                };
+
+                // Wait for both Google scripts to load
+                const checkReady = setInterval(() => {
+                    if (window.google && window.gapi) {
+                        clearInterval(checkReady);
+                        console.log('✓ Google scripts loaded');
+                        initGoogleAuth();
+                    }
+                }, 100);
+
+                // Cleanup
+                return () => clearInterval(checkReady);
+            }, []);
+
+            // Delete trade from app AND Google Sheets
+            const deleteTrade = async (tradeId) => {
+                if (!window.confirm('⚠️ Delete this trade?\n\nThis will remove it from the app AND from Google Sheets!\n\nThis cannot be undone.')) {
+                    return;
+                }
+                
+                try {
+                    // Remove from local state
+                    const updatedTrades = trades.filter(t => t.id !== tradeId);
+                    setTrades(updatedTrades);
+                    setSelectedTrade(null);
+                    
+                    // Delete from Google Sheets
+                    await deleteFromSheet(tradeId);
+                    
+                    alert('✅ Trade deleted from app and Google Sheets!');
+                    
+                } catch (error) {
+                    console.error('Error deleting trade:', error);
+                    alert('Error deleting trade: ' + error.message);
+                }
+            };
+
+            // Delete trade from Google Sheets
+            const deleteFromSheet = async (tradeId) => {
+                try {
+                    console.log('Deleting trade from Google Sheets:', tradeId);
+                    
+                    // First, get all rows to find the trade
+                    const response = await gapi.client.sheets.spreadsheets.values.get({
+                        spreadsheetId: SPREADSHEET_ID,
+                        range: 'Trading Journal!A2:A',
+                    });
+                    
+                    const rows = response.result.values || [];
+                    
+                    // Find the row index (adding 2 because: 1 for header row, 1 for 0-based indexing)
+                    const rowIndex = rows.findIndex(row => row[0] === tradeId);
+                    
+                    if (rowIndex === -1) {
+                        console.log('Trade not found in sheet, may have already been deleted');
+                        return;
+                    }
+                    
+                    const actualRowNumber = rowIndex + 2; // +2 for header and 0-based index
+                    
+                    // Delete the row using batchUpdate
+                    await gapi.client.sheets.spreadsheets.batchUpdate({
+                        spreadsheetId: SPREADSHEET_ID,
+                        resource: {
+                            requests: [{
+                                deleteDimension: {
+                                    range: {
+                                        sheetId: 0, // Assuming first sheet, adjust if needed
+                                        dimension: 'ROWS',
+                                        startIndex: actualRowNumber - 1, // 0-based
+                                        endIndex: actualRowNumber // exclusive
+                                    }
+                                }
+                            }]
+                        }
+                    });
+                    
+                    console.log('✓ Trade deleted from Google Sheets');
+                    
+                } catch (error) {
+                    console.error('Error deleting from sheet:', error);
+                    // Don't throw - trade already deleted locally
+                }
+            };
+
+            // Close trade (sell/exit position)
+            const closeTrade = async (tradeId) => {
+                const exitPrice = prompt(
+                    `Close this trade\n\n` +
+                    `What price did you sell/exit at?\n` +
+                    `(Enter the exit premium per contract)`,
+                    ''
+                );
+                
+                if (exitPrice === null || exitPrice === '') {
+                    return; // User cancelled
+                }
+                
+                try {
+                    const updatedTrades = trades.map(t => 
+                        t.id === tradeId 
+                            ? { 
+                                ...t, 
+                                status: 'closed', 
+                                exitPrice: parseFloat(exitPrice), 
+                                exitDate: new Date().toISOString() 
+                              }
+                            : t
+                    );
+                    
+                    setTrades(updatedTrades);
+                    
+                    // Update the selected trade to show new status
+                    const closedTrade = updatedTrades.find(t => t.id === tradeId);
+                    setSelectedTrade(closedTrade);
+                    
+                    // Update in Google Sheets
+                    await updateTradeInSheet(closedTrade);
+                    
+                    // Calculate P&L
+                    const pnl = (parseFloat(exitPrice) - closedTrade.premium) * closedTrade.quantity * 100;
+                    
+                    alert(`✅ Trade closed and synced to Google Sheets!\n\nP&L: $${pnl.toFixed(2)}`);
+                    
+                } catch (error) {
+                    console.error('Error closing trade:', error);
+                    alert('Error closing trade: ' + error.message);
+                }
+            };
+
+            // Update trade in Google Sheets (used when closing a trade)
+            const updateTradeInSheet = async (trade) => {
+                try {
+                    // Get all rows to find the trade
+                    const response = await gapi.client.sheets.spreadsheets.values.get({
+                        spreadsheetId: SPREADSHEET_ID,
+                        range: 'Trading Journal!A2:A',
+                    });
+                    
+                    const rows = response.result.values || [];
+                    const rowIndex = rows.findIndex(row => row[0] === trade.id);
+                    
+                    if (rowIndex === -1) {
+                        console.log('Trade not found in sheet');
+                        return;
+                    }
+                    
+                    const actualRowNumber = rowIndex + 2; // +2 for header and 0-based index
+                    
+                    // Update the row
+                    const row = [
+                        trade.id,
+                        trade.symbol,
+                        trade.type,
+                        trade.longStrike || '',
+                        trade.shortStrike || '',
+                        trade.expiry,
+                        trade.quantity,
+                        trade.premium,
+                        trade.thesis,
+                        trade.actual,
+                        trade.marketData?.stockPrice || 0,
+                        trade.marketData?.spx || 0,
+                        trade.marketData?.nasdaq || 0,
+                        trade.marketData?.timestamp || '',
+                        trade.marketData?.date || '',
+                        trade.marketData?.time || '',
+                        trade.entryDate,
+                        trade.status,
+                        trade.tags?.join(',') || '',
+                        trade.notes || '',
+                        trade.exitPrice || '',
+                        trade.exitDate || ''
+                    ];
+                    
+                    await gapi.client.sheets.spreadsheets.values.update({
+                        spreadsheetId: SPREADSHEET_ID,
+                        range: `Trading Journal!A${actualRowNumber}:V${actualRowNumber}`,
+                        valueInputOption: 'RAW',
+                        resource: {
+                            values: [row]
+                        }
+                    });
+                    
+                    console.log('✓ Trade updated in Google Sheets');
+                    
+                } catch (error) {
+                    console.error('Error updating trade in sheet:', error);
+                }
+            };
+
+            // Fetch market data using Alpha Vantage
+            const fetchMarketData = async (symbol, userInput) => {
+                try {
+                    const fetchQuote = async (ticker) => {
+                        try {
+                            const response = await fetch(
+                                `https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=${ticker}&apikey=${ALPHA_VANTAGE_KEY}`
+                            );
+                            const data = await response.json();
+                            
+                            if (data.Note || data.Information) {
+                                console.log('API rate limit. Please add your free Alpha Vantage API key.');
+                                return null;
+                            }
+                            
+                            const price = data['Global Quote']?.['05. price'];
+                            return price ? parseFloat(price) : null;
+                        } catch (e) {
+                            console.error(`Error fetching ${ticker}:`, e);
+                            return null;
+                        }
+                    };
+                    
+                    // If using demo key, skip API calls
+                    if (ALPHA_VANTAGE_KEY === 'demo') {
+                        const priceMatch = userInput.match(/at\s+\$?(\d+\.?\d*)/i);
+                        return {
+                            stockPrice: priceMatch ? parseFloat(priceMatch[1]) : 0,
+                            spx: 0,
+                            nasdaq: 0,
+                            timestamp: new Date().toISOString(),
+                            date: new Date().toLocaleDateString(),
+                            time: new Date().toLocaleTimeString(),
+                        };
+                    }
+                    
+                    // Fetch prices
+                    const stockPrice = await fetchQuote(symbol);
+                    const spyPrice = await fetchQuote('SPY');
+                    const qqqPrice = await fetchQuote('QQQ');
+                    
+                    return {
+                        stockPrice: stockPrice || 0,
+                        spx: spyPrice ? spyPrice * 10 : 0,
+                        nasdaq: qqqPrice ? qqqPrice * 50 : 0,
+                        timestamp: new Date().toISOString(),
+                        date: new Date().toLocaleDateString(),
+                        time: new Date().toLocaleTimeString(),
+                    };
+                } catch (error) {
+                    console.error('Error fetching market data:', error);
+                    const priceMatch = userInput.match(/at\s+\$?(\d+\.?\d*)/i);
+                    return {
+                        stockPrice: priceMatch ? parseFloat(priceMatch[1]) : 0,
+                        spx: 0,
+                        nasdaq: 0,
+                        timestamp: new Date().toISOString(),
+                        date: new Date().toLocaleDateString(),
+                        time: new Date().toLocaleTimeString(),
+                    };
+                }
+            };
+
+            // Smart pattern matching parser - FREE, works offline
+            const parseTradeInput = async (input) => {
+                setIsProcessing(true);
+                try {
+                    const text = input.toLowerCase();
+                    
+                    // Extract symbol (3-5 uppercase letters) - use let so it can be edited
+                    const symbolMatch = input.match(/\b([A-Z]{2,5})\b/);
+                    let symbol = symbolMatch ? symbolMatch[1] : '';
+                    
+                    // Detect trade type - use let so it can be edited
+                    let type = 'call_spread';
+                    if (text.includes('put spread') || text.includes('put-spread')) type = 'put_spread';
+                    else if (text.includes('call spread') || text.includes('call-spread')) type = 'call_spread';
+                    else if (text.includes('put')) type = 'put';
+                    else if (text.includes('call')) type = 'call';
+                    
+                    // Extract strikes - use let so it can be edited
+                    let longStrike = '';
+                    let shortStrike = '';
+                    let strikeMatch = input.match(/(\d+)\s*[\/\-]\s*(\d+)/);
+                    if (strikeMatch) {
+                        longStrike = strikeMatch[1];
+                        shortStrike = strikeMatch[2];
+                    }
+                    
+                    // Extract quantity - use let so it can be edited
+                    let quantity = '1';
+                    let qtyMatch = input.match(/(\d+)\s+(?:contracts?|call|put|spread)/i);
+                    if (qtyMatch) {
+                        quantity = qtyMatch[1];
+                    }
+                    
+                    // Extract premium - use let so it can be edited
+                    let premium = '';
+                    let premiumMatch = input.match(/[\$@]\s*(\d+\.?\d*)/);
+                    if (!premiumMatch) {
+                        premiumMatch = input.match(/(?:at|for)\s+(\d+\.?\d*)/i);
+                    }
+                    if (premiumMatch) premium = premiumMatch[1];
+                    
+                    // Extract expiry - use let so it can be edited
+                    const today = new Date();
+                    let expiry = '';
+                    let dateMatch = input.match(/(\d{1,2})[\/\-](\d{1,2})/);
+                    if (dateMatch) {
+                        const month = dateMatch[1].padStart(2, '0');
+                        const day = dateMatch[2].padStart(2, '0');
+                        const year = today.getFullYear();
+                        expiry = `${year}-${month}-${day}`;
+                    } else {
+                        const futureDate = new Date(today);
+                        futureDate.setDate(futureDate.getDate() + 30);
+                        expiry = futureDate.toISOString().split('T')[0];
+                    }
+                    
+                    // Validation
+                    if (!symbol) {
+                        alert('❌ Could not find stock symbol (e.g., GOOG, AAPL).\n\nTip: Use UPPERCASE for symbol.');
+                        setIsProcessing(false);
+                        return;
+                    }
+                    
+                    // STEP 1: Show what we parsed and let user confirm or edit
+                    const parsedSummary = 
+                        `I parsed this:\n\n` +
+                        `Symbol: ${symbol}\n` +
+                        `Type: ${type.replace('_', ' ').toUpperCase()}\n` +
+                        `${longStrike ? `Strikes: ${longStrike}/${shortStrike}\n` : ''}` +
+                        `Quantity: ${quantity} contracts\n` +
+                        `${premium ? `Premium: $${premium}\n` : 'Premium: Not found\n'}` +
+                        `Expiry: ${new Date(expiry).toLocaleDateString()}\n\n` +
+                        `Is this correct?\n\n` +
+                        `Click OK to continue\n` +
+                        `Click Cancel to edit fields`;
+                    
+                    if (!window.confirm(parsedSummary)) {
+                        // User wants to edit - show all fields in ONE prompt
+                        const editInstructions = 
+                            `Edit the trade details below.\n` +
+                            `Enter values separated by commas in this order:\n` +
+                            `Symbol, Type, Long Strike, Short Strike, Quantity, Premium, Expiry\n\n` +
+                            `Type options: call_spread, put_spread, call, put\n` +
+                            `Expiry format: YYYY-MM-DD\n\n` +
+                            `Current values:`;
+                        
+                        const currentValues = `${symbol},${type},${longStrike || ''},${shortStrike || ''},${quantity},${premium || ''},${expiry}`;
+                        
+                        const editedValues = prompt(editInstructions, currentValues);
+                        
+                        if (editedValues === null) {
+                            alert('Trade cancelled.');
+                            setIsProcessing(false);
+                            return;
+                        }
+                        
+                        // Parse the edited values
+                        const parts = editedValues.split(',').map(p => p.trim());
+                        if (parts.length >= 7) {
+                            symbol = parts[0].toUpperCase() || symbol;
+                            type = parts[1] || type;
+                            longStrike = parts[2] || longStrike;
+                            shortStrike = parts[3] || shortStrike;
+                            quantity = parts[4] || quantity;
+                            premium = parts[5] || premium;
+                            expiry = parts[6] || expiry;
+                        } else {
+                            alert('Invalid format. Please enter all 7 values separated by commas.');
+                            setIsProcessing(false);
+                            return;
+                        }
+                        
+                        // Show final confirmation after edits
+                        const finalConfirm = window.confirm(
+                            `Final check:\n\n` +
+                            `Symbol: ${symbol}\n` +
+                            `Type: ${type}\n` +
+                            `${longStrike ? `Strikes: ${longStrike}/${shortStrike}\n` : ''}` +
+                            `Quantity: ${quantity}\n` +
+                            `Premium: $${premium}\n` +
+                            `Expiry: ${expiry}\n\n` +
+                            `Proceed with this trade?`
+                        );
+                        
+                        if (!finalConfirm) {
+                            alert('Trade cancelled.');
+                            setIsProcessing(false);
+                            return;
+                        }
+                    }
+                    
+                    const marketData = await fetchMarketData(symbol, input);
+                    
+                    // STEP 2: Ask for thesis
+                    const thesisInput = prompt(
+                        `Why are you making this trade?\n\n` +
+                        `Your thesis/reasoning:`,
+                        input
+                    );
+                    
+                    // Allow cancel
+                    if (thesisInput === null) {
+                        alert('Trade cancelled.');
+                        setIsProcessing(false);
+                        return;
+                    }
+                    
+                    const finalThesis = thesisInput || input;
+                    
+                    // STEP 3: Ask Actual or Paper (Hypothetical) - clearer labels
+                    const isActual = window.confirm(
+                        `💰 ACTUAL or 📝 PAPER?\n\n` +
+                        `Click "OK" = ACTUAL (real money)\n` +
+                        `Click "Cancel" = PAPER (hypothetical)\n\n` +
+                        `Which type of trade is this?`
+                    );
+                    
+                    const newTrade = {
+                        id: Date.now().toString(),
+                        symbol,
+                        type,
+                        longStrike: longStrike ? parseFloat(longStrike) : null,
+                        shortStrike: shortStrike ? parseFloat(shortStrike) : null,
+                        expiry,
+                        quantity: parseInt(quantity),
+                        premium: premium ? parseFloat(premium) : 0,
+                        thesis: finalThesis,
+                        actual: isActual,
+                        marketData,
+                        entryDate: new Date().toISOString(),
+                        status: 'open',
+                        tags: [],
+                        notes: '',
+                    };
+                    
+                    const updatedTrades = [...trades, newTrade];
+                    setTrades(updatedTrades);
+                    
+                    // Auto-sync to Google Sheets
+                    await syncToSheet(newTrade);
+                    
+                    setConversationalInput('');
+                    setShowAddTrade(false);
+                    
+                    alert(`✅ Trade Saved & Synced to Google Sheets!\n\n${symbol} ${type.replace('_', ' ').toUpperCase()}\n${longStrike ? `${longStrike}/${shortStrike}` : ''}\n${quantity} contracts`);
+                    
+                } catch (error) {
+                    console.error('Error parsing trade:', error);
+                    alert('Error parsing. Error: ' + error.message);
+                } finally {
+                    setIsProcessing(false);
+                }
+            };
+
+            // Load trades from Google Sheet
+            const loadTradesFromSheet = async () => {
+                try {
+                    console.log('Attempting to load trades from sheet...');
+                    const response = await gapi.client.sheets.spreadsheets.values.get({
+                        spreadsheetId: SPREADSHEET_ID,
+                        range: 'Trading Journal!A2:V',
+                    });
+
+                    const rows = response.result.values || [];
+                    console.log(`Loaded ${rows.length} trades from sheet`);
+                    
+                    const loadedTrades = rows.map(row => ({
+                        id: row[0],
+                        symbol: row[1],
+                        type: row[2],
+                        longStrike: row[3] ? parseFloat(row[3]) : null,
+                        shortStrike: row[4] ? parseFloat(row[4]) : null,
+                        expiry: row[5],
+                        quantity: parseInt(row[6]),
+                        premium: parseFloat(row[7]),
+                        thesis: row[8],
+                        actual: row[9] === 'TRUE' || row[9] === true,
+                        marketData: {
+                            stockPrice: parseFloat(row[10]) || 0,
+                            spx: parseFloat(row[11]) || 0,
+                            nasdaq: parseFloat(row[12]) || 0,
+                            timestamp: row[13],
+                            date: row[14],
+                            time: row[15],
+                        },
+                        entryDate: row[16],
+                        status: row[17] || 'open',
+                        tags: row[18] ? row[18].split(',') : [],
+                        notes: row[19] || '',
+                        exitPrice: row[20] ? parseFloat(row[20]) : null,
+                        exitDate: row[21] || null
+                    }));
+
+                    setTrades(loadedTrades);
+                } catch (error) {
+                    console.error('Error loading from sheet:', error);
+                    console.error('Error details:', error.result?.error);
+                    
+                    // If sheet doesn't exist, create it
+                    if (error.result?.error?.code === 400 || error.status === 400) {
+                        console.log('Sheet probably does not exist. Creating...');
+                        await createSheet();
+                    }
+                }
+            };
+
+            // Create Google Sheet with headers
+            const createSheet = async () => {
+                try {
+                    console.log('Creating Trading Journal sheet with headers...');
+                    const response = await gapi.client.sheets.spreadsheets.values.update({
+                        spreadsheetId: SPREADSHEET_ID,
+                        range: 'Trading Journal!A1:V1',
+                        valueInputOption: 'RAW',
+                        resource: {
+                            values: [[
+                                'ID', 'Symbol', 'Type', 'Long Strike', 'Short Strike', 'Expiry',
+                                'Quantity', 'Premium', 'Thesis', 'Actual', 'Stock Price', 'SPX',
+                                'NASDAQ', 'Timestamp', 'Date', 'Time', 'Entry Date', 'Status',
+                                'Tags', 'Notes', 'Exit Price', 'Exit Date'
+                            ]]
+                        }
+                    });
+                    console.log('✓ Sheet created with headers');
+                } catch (error) {
+                    console.error('Error creating sheet:', error);
+                    console.error('Error details:', error.result?.error);
+                    alert('Could not create sheet. Make sure the spreadsheet exists and you have edit permissions.');
+                }
+            };
+
+            // Sync single trade to Google Sheets
+            const syncToSheet = async (trade) => {
+                try {
+                    const row = [
+                        trade.id,
+                        trade.symbol,
+                        trade.type,
+                        trade.longStrike || '',
+                        trade.shortStrike || '',
+                        trade.expiry,
+                        trade.quantity,
+                        trade.premium,
+                        trade.thesis,
+                        trade.actual,
+                        trade.marketData?.stockPrice || 0,
+                        trade.marketData?.spx || 0,
+                        trade.marketData?.nasdaq || 0,
+                        trade.marketData?.timestamp || '',
+                        trade.marketData?.date || '',
+                        trade.marketData?.time || '',
+                        trade.entryDate,
+                        trade.status,
+                        trade.tags?.join(',') || '',
+                        trade.notes || '',
+                        trade.exitPrice || '',
+                        trade.exitDate || ''
+                    ];
+
+                    await gapi.client.sheets.spreadsheets.values.append({
+                        spreadsheetId: SPREADSHEET_ID,
+                        range: 'Trading Journal!A2',
+                        valueInputOption: 'RAW',
+                        resource: {
+                            values: [row]
+                        }
+                    });
+
+                    console.log('Trade synced to Google Sheets');
+                } catch (error) {
+                    console.error('Error syncing to sheet:', error);
+                    alert('⚠️ Trade saved locally but failed to sync to Google Sheets. Check console for details.');
+                }
+            };
+
+            // Sign in handler
+            const handleSignIn = () => {
+                console.log('Sign in button clicked');
+                console.log('tokenClient available:', !!window.tokenClient);
+                
+                if (window.tokenClient) {
+                    try {
+                        window.tokenClient.requestAccessToken();
+                    } catch (error) {
+                        console.error('Error requesting access token:', error);
+                        alert('Error signing in. Please refresh the page and try again.\n\nError: ' + error.message);
+                    }
+                } else {
+                    console.error('Token client not initialized yet');
+                    alert('Google authentication is still loading. Please wait a moment and try again.');
+                }
+            };
+
+            // Sign out handler
+            const handleSignOut = () => {
+                google.accounts.oauth2.revoke(accessToken, () => {
+                    setAccessToken(null);
+                    setIsSignedIn(false);
+                    setTrades([]);
+                    setUserEmail('');
+                });
+            };
+
+            // UI Components
+            const daysUntil = (dateString) => {
+                const expiry = new Date(dateString);
+                const today = new Date();
+                const diff = Math.ceil((expiry - today) / (1000 * 60 * 60 * 24));
+                return diff;
+            };
+
+            const formatCurrency = (value) => {
+                return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value);
+            };
+
+            if (!isSignedIn) {
+                return (
+                    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-950 via-emerald-950 to-slate-950">
+                        <div className="bg-slate-900 border border-emerald-700/30 rounded-2xl p-12 max-w-md w-full shadow-2xl">
+                            <div className="text-center mb-8">
+                                <div className="text-6xl mb-4">📊</div>
+                                <h1 className="text-3xl font-bold mb-2">Trade Validator</h1>
+                                <p className="text-slate-400">Google Sheets Auto-Sync Edition</p>
+                            </div>
+                            
+                            <div className="space-y-4 mb-8">
+                                <div className="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+                                    <h3 className="font-bold mb-2 flex items-center gap-2">
+                                        <span className="text-emerald-400">✓</span>
+                                        Log trades conversationally
+                                    </h3>
+                                    <p className="text-sm text-slate-400">Voice-to-text on phone, smart parsing</p>
+                                </div>
+                                <div className="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+                                    <h3 className="font-bold mb-2 flex items-center gap-2">
+                                        <span className="text-emerald-400">✓</span>
+                                        Auto-sync to Google Sheets
+                                    </h3>
+                                    <p className="text-sm text-slate-400">Every trade automatically saved to cloud</p>
+                                </div>
+                                <div className="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+                                    <h3 className="font-bold mb-2 flex items-center gap-2">
+                                        <span className="text-emerald-400">✓</span>
+                                        Real market data
+                                    </h3>
+                                    <p className="text-sm text-slate-400">Stock, SPX, NASDAQ at entry time</p>
+                                </div>
+                            </div>
+
+                            <button 
+                                onClick={handleSignIn}
+                                className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-4 px-6 rounded-lg transition-all shadow-lg"
+                            >
+                                🔐 Sign in with Google
+                            </button>
+
+                            <div className="mt-6 text-xs text-slate-500 text-center">
+                                <p>Uses new Google Identity Services</p>
+                                <p className="mt-2">Setup: Replace CLIENT_ID, API_KEY, SPREADSHEET_ID in code</p>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="min-h-screen bg-slate-950 p-4">
+                    <div className="max-w-6xl mx-auto">
+                        {/* Header */}
+                        <div className="bg-gradient-to-r from-emerald-600 to-emerald-700 rounded-xl p-6 mb-6 shadow-xl">
+                            <div className="flex items-center justify-between">
+                                <div>
+                                    <h1 className="text-3xl font-bold mb-1">Trade Validator</h1>
+                                    <p className="text-emerald-100">✓ Synced to Google Sheets</p>
+                                </div>
+                                <button 
+                                    onClick={handleSignOut}
+                                    className="bg-white/20 hover:bg-white/30 px-4 py-2 rounded-lg transition-all"
+                                >
+                                    Sign Out
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Add Trade Section */}
+                        {!showAddTrade ? (
+                            <button 
+                                onClick={() => setShowAddTrade(true)}
+                                className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-4 px-6 rounded-xl mb-6 transition-all shadow-lg"
+                            >
+                                + Log New Trade
+                            </button>
+                        ) : (
+                            <div className="bg-slate-900 border border-slate-700 rounded-xl p-6 mb-6">
+                                <h2 className="text-xl font-bold mb-4">Log Trade (Voice or Type)</h2>
+                                <textarea
+                                    value={conversationalInput}
+                                    onChange={(e) => setConversationalInput(e.target.value)}
+                                    placeholder='Say: "GOOG 325/350 call spread 5 contracts 3/16 at 3.50"'
+                                    className="w-full bg-slate-800 border border-slate-700 rounded-lg p-4 text-white mb-4 min-h-32"
+                                />
+                                <div className="flex gap-3">
+                                    <button
+                                        onClick={() => parseTradeInput(conversationalInput)}
+                                        disabled={isProcessing || !conversationalInput}
+                                        className="flex-1 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-700 text-white font-bold py-3 px-6 rounded-lg transition-all"
+                                    >
+                                        {isProcessing ? '⏳ Processing...' : '✓ Log Trade'}
+                                    </button>
+                                    <button
+                                        onClick={() => setShowAddTrade(false)}
+                                        className="px-6 py-3 bg-slate-700 hover:bg-slate-600 rounded-lg transition-all"
+                                    >
+                                        Cancel
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Stats */}
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                            <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-4">
+                                <div className="text-slate-400 text-sm mb-1">Total Trades</div>
+                                <div className="text-3xl font-bold text-emerald-400">{trades.length}</div>
+                            </div>
+                            <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-4">
+                                <div className="text-slate-400 text-sm mb-1">Open Positions</div>
+                                <div className="text-3xl font-bold text-blue-400">
+                                    {trades.filter(t => t.status === 'open').length}
+                                </div>
+                            </div>
+                            <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-4">
+                                <div className="text-slate-400 text-sm mb-1">Actual Trades</div>
+                                <div className="text-3xl font-bold text-purple-400">
+                                    {trades.filter(t => t.actual).length}
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Trades List */}
+                        <div className="bg-slate-900 border border-slate-700 rounded-xl p-6">
+                            <h2 className="text-xl font-bold mb-4">All Trades</h2>
+                            {trades.length === 0 ? (
+                                <div className="text-center py-12 text-slate-500">
+                                    <p>No trades yet. Log your first trade!</p>
+                                </div>
+                            ) : (
+                                <div className="space-y-3">
+                                    {trades.slice().reverse().map(trade => (
+                                        <div key={trade.id} className="bg-slate-800/50 border border-slate-700 rounded-lg p-4 hover:border-emerald-500/50 transition-all cursor-pointer" onClick={() => setSelectedTrade(trade)}>
+                                            <div className="flex items-center justify-between">
+                                                <div>
+                                                    <div className="flex items-center gap-2 mb-1">
+                                                        <h3 className="text-xl font-bold">{trade.symbol}</h3>
+                                                        <span className={`px-2 py-0.5 rounded text-xs ${trade.actual ? 'bg-emerald-900/30 text-emerald-400' : 'bg-blue-900/30 text-blue-400'}`}>
+                                                            {trade.actual ? 'ACTUAL' : 'PAPER'}
+                                                        </span>
+                                                    </div>
+                                                    <div className="text-sm text-slate-400">
+                                                        {trade.type.replace('_', ' ').toUpperCase()}
+                                                        {trade.longStrike && ` ${trade.longStrike}/${trade.shortStrike}`}
+                                                    </div>
+                                                </div>
+                                                <div className="text-right">
+                                                    <div className="font-mono text-lg">{daysUntil(trade.expiry)}d</div>
+                                                    <div className="text-xs text-slate-500">{trade.status}</div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* Trade Detail Modal */}
+                    {selectedTrade && (
+                        <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50" onClick={() => setSelectedTrade(null)}>
+                            <div className="bg-slate-900 border border-slate-700 rounded-xl p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+                                <div className="flex items-start justify-between mb-6">
+                                    <div>
+                                        <h2 className="text-3xl font-bold mb-2">{selectedTrade.symbol}</h2>
+                                        <div className="text-slate-400">{selectedTrade.type.replace('_', ' ').toUpperCase()}</div>
+                                    </div>
+                                    <div className="flex gap-2">
+                                        {selectedTrade.status === 'open' && (
+                                            <button 
+                                                onClick={() => closeTrade(selectedTrade.id)} 
+                                                className="px-3 py-2 bg-emerald-900/30 border border-emerald-700 text-emerald-400 rounded-lg hover:bg-emerald-900/50 transition-all text-sm"
+                                            >
+                                                💰 Close Trade
+                                            </button>
+                                        )}
+                                        <button 
+                                            onClick={() => deleteTrade(selectedTrade.id)} 
+                                            className="px-3 py-2 bg-red-900/30 border border-red-700 text-red-400 rounded-lg hover:bg-red-900/50 transition-all text-sm"
+                                        >
+                                            🗑️ Delete
+                                        </button>
+                                        <button onClick={() => setSelectedTrade(null)} className="text-slate-400 hover:text-white px-3">
+                                            ✕
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {selectedTrade.marketData && (
+                                    <div className="bg-slate-800/50 rounded-lg p-4 mb-4">
+                                        <h3 className="font-bold mb-3">Market Context at Entry</h3>
+                                        <div className="grid grid-cols-3 gap-4">
+                                            <div>
+                                                <div className="text-xs text-slate-400">Stock Price</div>
+                                                <div className="text-xl font-mono font-bold">
+                                                    ${selectedTrade.marketData.stockPrice ? selectedTrade.marketData.stockPrice.toFixed(2) : 'N/A'}
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <div className="text-xs text-slate-400">S&P 500</div>
+                                                <div className="text-xl font-mono">
+                                                    {selectedTrade.marketData.spx ? selectedTrade.marketData.spx.toFixed(0) : 'N/A'}
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <div className="text-xs text-slate-400">NASDAQ</div>
+                                                <div className="text-xl font-mono">
+                                                    {selectedTrade.marketData.nasdaq ? selectedTrade.marketData.nasdaq.toFixed(0) : 'N/A'}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+
+                                {selectedTrade.thesis && (
+                                    <div className="bg-slate-800/50 rounded-lg p-4 mb-4">
+                                        <h3 className="font-bold mb-2">Thesis</h3>
+                                        <p className="text-slate-300">{selectedTrade.thesis}</p>
+                                    </div>
+                                )}
+
+                                <div className="grid grid-cols-2 gap-4 text-sm">
+                                    <div>
+                                        <span className="text-slate-400">Quantity:</span> {selectedTrade.quantity} contracts
+                                    </div>
+                                    <div>
+                                        <span className="text-slate-400">Premium:</span> ${selectedTrade.premium}
+                                    </div>
+                                    <div>
+                                        <span className="text-slate-400">Expiry:</span> {new Date(selectedTrade.expiry).toLocaleDateString()}
+                                    </div>
+                                    <div>
+                                        <span className="text-slate-400">Status:</span> {selectedTrade.status}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
+</body>
+</html>
