@@ -372,15 +372,27 @@
                         longStrike = strikeMatch[1];
                         shortStrike = strikeMatch[2];
                     }
-                    
-                    // Extract quantity - use let so it can be edited
+                                        
                     let quantity = '1';
-                    let qtyMatch = input.match(/(\d+)\s+(?:contracts?|call|put|spread)/i);
-                    if (qtyMatch) {
-                        quantity = qtyMatch[1];
+                    // For stocks, look for "shares" or just numbers
+                    if (type === 'stock') {
+                        let qtyMatch = input.match(/(\d+)\s+(?:shares?|stock)/i);
+                        if (qtyMatch) {
+                            quantity = qtyMatch[1];
+                        } else {
+                            // Try to find standalone number (like "300 AAPL")
+                            qtyMatch = input.match(/(?:buy|sell|bought|sold)\s+(\d+)/i);
+                            if (qtyMatch) quantity = qtyMatch[1];
+                        }
+                    } else {
+                        // For options
+                        let qtyMatch = input.match(/(\d+)\s+(?:contracts?|call|put|spread)/i);
+                        if (qtyMatch) {
+                            quantity = qtyMatch[1];
+                        }
                     }
                     
-                    // Extract premium - use let so it can be edited
+                    // Extract premium/price - use let so it can be edited
                     let premium = '';
                     let premiumMatch = input.match(/[\$@]\s*(\d+\.?\d*)/);
                     if (!premiumMatch) {
@@ -388,20 +400,29 @@
                     }
                     if (premiumMatch) premium = premiumMatch[1];
                     
+                    // For stocks, this is the stock price, not premium
                     // Extract expiry - use let so it can be edited
                     const today = new Date();
                     let expiry = '';
-                    let dateMatch = input.match(/(\d{1,2})[\/\-](\d{1,2})/);
-                    if (dateMatch) {
-                        const month = dateMatch[1].padStart(2, '0');
-                        const day = dateMatch[2].padStart(2, '0');
-                        const year = today.getFullYear();
-                        expiry = `${year}-${month}-${day}`;
+                    
+                    // For stocks, expiry is not applicable - use entry date
+                    if (type === 'stock') {
+                        expiry = today.toISOString().split('T')[0]; // Today's date
                     } else {
-                        const futureDate = new Date(today);
-                        futureDate.setDate(futureDate.getDate() + 30);
-                        expiry = futureDate.toISOString().split('T')[0];
+                        // For options, parse expiry date
+                        let dateMatch = input.match(/(\d{1,2})[\/\-](\d{1,2})/);
+                        if (dateMatch) {
+                            const month = dateMatch[1].padStart(2, '0');
+                            const day = dateMatch[2].padStart(2, '0');
+                            const year = today.getFullYear();
+                            expiry = `${year}-${month}-${day}`;
+                        } else {
+                            const futureDate = new Date(today);
+                            futureDate.setDate(futureDate.getDate() + 30);
+                            expiry = futureDate.toISOString().split('T')[0];
+                        }
                     }
+
                     
                     // Validation
                     if (!symbol) {
@@ -412,16 +433,16 @@
                     
                     // STEP 1: Show what we parsed and let user confirm or edit
                     const parsedSummary = 
-                        `I parsed this:\n\n` +
-                        `Symbol: ${symbol}\n` +
-                        `Type: ${type.replace('_', ' ').toUpperCase()}\n` +
-                        `${longStrike ? `Strikes: ${longStrike}/${shortStrike}\n` : ''}` +
-                        `Quantity: ${quantity} contracts\n` +
-                        `${premium ? `Premium: $${premium}\n` : 'Premium: Not found\n'}` +
-                        `Expiry: ${new Date(expiry).toLocaleDateString()}\n\n` +
-                        `Is this correct?\n\n` +
-                        `Click OK to continue\n` +
-                        `Click Cancel to edit fields`;
+                    `I parsed this:\n\n` +
+                    `Symbol: ${symbol}\n` +
+                    `Type: ${type.replace('_', ' ').toUpperCase()}\n` +
+                    `${longStrike ? `Strikes: ${longStrike}/${shortStrike}\n` : ''}` +
+                    `Quantity: ${quantity} ${type === 'stock' ? 'shares' : 'contracts'}\n` +
+                    `${premium ? (type === 'stock' ? `Price: $${premium}\n` : `Premium: $${premium}\n`) : (type === 'stock' ? 'Price: Not found\n' : 'Premium: Not found\n')}` +
+                    `${type !== 'stock' ? `Expiry: ${new Date(expiry).toLocaleDateString()}\n` : ''}` +
+                    `\nIs this correct?\n\n` +
+                    `Click OK to continue\n` +
+                    `Click Cancel to edit fields`;
                     
                     if (!window.confirm(parsedSummary)) {
                     // User wants to edit - show fields one by one with better labels
