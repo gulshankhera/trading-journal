@@ -348,12 +348,21 @@
                     const symbolMatch = input.match(/\b([A-Z]{2,5})\b/);
                     let symbol = symbolMatch ? symbolMatch[1] : '';
                     
-                    // Detect trade type - use let so it can be edited
+                    // Check if user is talking about stocks/shares (not options)
                     let type = 'call_spread';
-                    if (text.includes('put spread') || text.includes('put-spread')) type = 'put_spread';
-                    else if (text.includes('call spread') || text.includes('call-spread')) type = 'call_spread';
-                    else if (text.includes('put')) type = 'put';
-                    else if (text.includes('call')) type = 'call';
+                    if (text.includes('stock') || text.includes('share')) {
+                        type = 'stock'; // Not an option trade
+                    } else if (text.includes('put spread') || text.includes('put-spread')) {
+                        type = 'put_spread';
+                    } else if (text.includes('call spread') || text.includes('call-spread')) {
+                        type = 'call_spread';
+                    } else if (text.includes('put')) {
+                        type = 'put';
+                    } else if (text.includes('call')) {
+                        type = 'call';
+                    } else if (text.includes('buy write')) {
+                        type = 'buy write';
+                    }
                     
                     // Extract strikes - use let so it can be edited
                     let longStrike = '';
@@ -415,59 +424,57 @@
                         `Click Cancel to edit fields`;
                     
                     if (!window.confirm(parsedSummary)) {
-                        // User wants to edit - show all fields in ONE prompt
-                        const editInstructions = 
-                            `Edit the trade details below.\n` +
-                            `Enter values separated by commas in this order:\n` +
-                            `Symbol, Type, Long Strike, Short Strike, Quantity, Premium, Expiry\n\n` +
-                            `Type options: call_spread, put_spread, call, put\n` +
-                            `Expiry format: YYYY-MM-DD\n\n` +
-                            `Current values:`;
-                        
-                        const currentValues = `${symbol},${type},${longStrike || ''},${shortStrike || ''},${quantity},${premium || ''},${expiry}`;
-                        
-                        const editedValues = prompt(editInstructions, currentValues);
-                        
-                        if (editedValues === null) {
-                            alert('Trade cancelled.');
-                            setIsProcessing(false);
-                            return;
-                        }
-                        
-                        // Parse the edited values
-                        const parts = editedValues.split(',').map(p => p.trim());
-                        if (parts.length >= 7) {
-                            symbol = parts[0].toUpperCase() || symbol;
-                            type = parts[1] || type;
-                            longStrike = parts[2] || longStrike;
-                            shortStrike = parts[3] || shortStrike;
-                            quantity = parts[4] || quantity;
-                            premium = parts[5] || premium;
-                            expiry = parts[6] || expiry;
-                        } else {
-                            alert('Invalid format. Please enter all 7 values separated by commas.');
-                            setIsProcessing(false);
-                            return;
-                        }
-                        
-                        // Show final confirmation after edits
-                        const finalConfirm = window.confirm(
-                            `Final check:\n\n` +
-                            `Symbol: ${symbol}\n` +
-                            `Type: ${type}\n` +
-                            `${longStrike ? `Strikes: ${longStrike}/${shortStrike}\n` : ''}` +
-                            `Quantity: ${quantity}\n` +
-                            `Premium: $${premium}\n` +
-                            `Expiry: ${expiry}\n\n` +
-                            `Proceed with this trade?`
-                        );
-                        
-                        if (!finalConfirm) {
-                            alert('Trade cancelled.');
-                            setIsProcessing(false);
-                            return;
-                        }
+                    // User wants to edit - show fields one by one with better labels
+                    alert('Let\'s edit the trade details. Press Cancel on any field to abort.');
+
+                    const editedSymbol = prompt('Symbol:', symbol);
+                    if (editedSymbol === null) { setIsProcessing(false); return; }
+                    symbol = editedSymbol.toUpperCase();
+
+                    const editedType = prompt('Type (stock, call_spread, put_spread, call, put):', type);
+                    if (editedType === null) { setIsProcessing(false); return; }
+                    type = editedType;
+
+                    if (type.includes('spread')) {
+                        const editedLong = prompt('Long Strike:', longStrike);
+                        if (editedLong === null) { setIsProcessing(false); return; }
+                        longStrike = editedLong;
+
+                        const editedShort = prompt('Short Strike:', shortStrike);
+                        if (editedShort === null) { setIsProcessing(false); return; }
+                        shortStrike = editedShort;
                     }
+
+                    const editedQty = prompt('Quantity:', quantity);
+                    if (editedQty === null) { setIsProcessing(false); return; }
+                    quantity = editedQty;
+
+                    const editedPremium = prompt('Premium (per contract):', premium || '');
+                    if (editedPremium === null) { setIsProcessing(false); return; }
+                    premium = editedPremium;
+
+                    const editedExpiry = prompt('Expiry Date (YYYY-MM-DD):', expiry);
+                    if (editedExpiry === null) { setIsProcessing(false); return; }
+                    expiry = editedExpiry;
+
+                    // Show final confirmation
+                    const finalConfirm = window.confirm(
+                        `Final check:\n\n` +
+                        `Symbol: ${symbol}\n` +
+                        `Type: ${type}\n` +
+                        `${longStrike ? `Strikes: ${longStrike}/${shortStrike}\n` : ''}` +
+                        `Quantity: ${quantity}\n` +
+                        `Premium: $${premium}\n` +
+                        `Expiry: ${expiry}\n\n` +
+                        `Proceed?`
+                    );
+
+                    if (!finalConfirm) {
+                        alert('Trade cancelled.');
+                        setIsProcessing(false);
+                        return;
+                    }
+                }
                     
                     const marketData = await fetchMarketData(symbol, input);
                     
@@ -487,12 +494,15 @@
                     
                     const finalThesis = thesisInput || input;
                     
-                    // STEP 3: Ask Actual or Paper (Hypothetical) - clearer labels
+                    // More explicit labels - browser confirm() can't change button text,
+                    // but we can make it VERY clear
                     const isActual = window.confirm(
-                        `💰 ACTUAL or 📝 PAPER?\n\n` +
-                        `Click "OK" = ACTUAL (real money)\n` +
-                        `Click "Cancel" = PAPER (hypothetical)\n\n` +
-                        `Which type of trade is this?`
+                        `═══════════════════════\n` +
+                        `   💰 ACTUAL TRADE?\n` +
+                        `═══════════════════════\n\n` +
+                        `YES (OK button) = Real money trade\n` +
+                        `NO (Cancel button) = Paper/hypothetical\n\n` +
+                        `Is this a real money trade?`
                     );
                     
                     const newTrade = {
