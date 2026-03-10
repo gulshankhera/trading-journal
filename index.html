@@ -223,7 +223,7 @@
                         range: 'Trading Journal!A2:A',
                     });
                     
-                    const rows = response.result.values || [];
+                    const rows = response.result. 'ID', 'Symbol', 'Type', || [];
                     const rowIndex = rows.findIndex(row => row[0] === trade.id);
                     
                     if (rowIndex === -1) {
@@ -237,6 +237,7 @@
                     const row = [
                         trade.id,
                         trade.symbol,
+                        trade.action || 'buy', // ADD THIS LINE
                         trade.type,
                         trade.longStrike || '',
                         trade.shortStrike || '',
@@ -363,7 +364,12 @@
                     } else if (text.includes('buy write')) {
                         type = 'buy write';
                     }
-                    
+
+                    // Detect buy vs sell
+                    let action = 'buy'; // default
+                    if (text.includes('sell') || text.includes('sold') || text.includes('selling')) {
+                        action = 'sell';
+                    }
                     // Extract strikes - use let so it can be edited
                     let longStrike = '';
                     let shortStrike = '';
@@ -434,6 +440,7 @@
                     // STEP 1: Show what we parsed and let user confirm or edit
                     const parsedSummary = 
                     `I parsed this:\n\n` +
+                    `Action: ${action.toUpperCase()}\n` +
                     `Symbol: ${symbol}\n` +
                     `Type: ${type.replace('_', ' ').toUpperCase()}\n` +
                     `${longStrike ? `Strikes: ${longStrike}/${shortStrike}\n` : ''}` +
@@ -503,7 +510,7 @@
                     const thesisInput = prompt(
                         `Why are you making this trade?\n\n` +
                         `Your thesis/reasoning:`,
-                        input
+                        ''  // <-- EMPTY, NO PRE-FILL
                     );
                     
                     // Allow cancel
@@ -513,7 +520,7 @@
                         return;
                     }
                     
-                    const finalThesis = thesisInput || input;
+                    const finalThesis = thesisInput || '';  // If they cancel/leave blank, save empty string
                     
                     // More explicit labels - browser confirm() can't change button text,
                     // but we can make it VERY clear
@@ -530,6 +537,7 @@
                         id: Date.now().toString(),
                         symbol,
                         type,
+                        action: action, // ADD THIS LINE
                         longStrike: longStrike ? parseFloat(longStrike) : null,
                         shortStrike: shortStrike ? parseFloat(shortStrike) : null,
                         expiry,
@@ -578,28 +586,29 @@
                     const loadedTrades = rows.map(row => ({
                         id: row[0],
                         symbol: row[1],
-                        type: row[2],
-                        longStrike: row[3] ? parseFloat(row[3]) : null,
-                        shortStrike: row[4] ? parseFloat(row[4]) : null,
-                        expiry: row[5],
-                        quantity: parseInt(row[6]),
-                        premium: parseFloat(row[7]),
-                        thesis: row[8],
-                        actual: row[9] === 'TRUE' || row[9] === true,
+                        action: row[2] || 'buy', // ADD THIS LINE
+                        type: row[3], // CHANGED from row[2] to row[3]
+                        longStrike: row[4] ? parseFloat(row[4]) : null, // CHANGED from row[3] to row[4]
+                        shortStrike: row[5] ? parseFloat(row[5]) : null, // CHANGED from row[4] to row[5]
+                        expiry: row[6], // Keep updating all row indices +1
+                        quantity: parseInt(row[7]),
+                        premium: parseFloat(row[8]),
+                        thesis: row[9],
+                        actual: row[10] === 'TRUE' || row[10] === true,
                         marketData: {
-                            stockPrice: parseFloat(row[10]) || 0,
-                            spx: parseFloat(row[11]) || 0,
-                            nasdaq: parseFloat(row[12]) || 0,
-                            timestamp: row[13],
-                            date: row[14],
-                            time: row[15],
+                            stockPrice: parseFloat(row[11]) || 0,
+                            spx: parseFloat(row[12]) || 0,
+                            nasdaq: parseFloat(row[13]) || 0,
+                            timestamp: row[14],
+                            date: row[15],
+                            time: row[16],
                         },
-                        entryDate: row[16],
-                        status: row[17] || 'open',
-                        tags: row[18] ? row[18].split(',') : [],
-                        notes: row[19] || '',
-                        exitPrice: row[20] ? parseFloat(row[20]) : null,
-                        exitDate: row[21] || null
+                        entryDate: row[17],
+                        status: row[18] || 'open',
+                        tags: row[19] ? row[19].split(',') : [],
+                        notes: row[20] || '',
+                        exitPrice: row[21] ? parseFloat(row[21]) : null,
+                        exitDate: row[22] || null
                     }));
 
                     setTrades(loadedTrades);
