@@ -223,7 +223,7 @@
                         range: 'Trading Journal!A2:A',
                     });
                     
-                    const rows = response.result. 'ID', 'Symbol', 'Type', || [];
+                    const rows = response.result.values || [];
                     const rowIndex = rows.findIndex(row => row[0] === trade.id);
                     
                     if (rowIndex === -1) {
