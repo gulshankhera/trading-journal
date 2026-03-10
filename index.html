@@ -655,6 +655,7 @@
                     const row = [
                         trade.id,
                         trade.symbol,
+                        trade.action || 'buy',  // ADD THIS LINE
                         trade.type,
                         trade.longStrike || '',
                         trade.shortStrike || '',
